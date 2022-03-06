@@ -19,7 +19,7 @@ using TransactionDB = std::vector<Transaction>;
 using HeaderKey = std::pair<Item, int>;
 
 struct FrequencyCmp {
-    // sort key_pair<item, count> by greater<count>, less<item>
+    // sort key_pair<item, freq> by greater<freq>, less<item>
     bool operator()(const HeaderKey& lhs, const HeaderKey& rhs) const {
         if (lhs.second != rhs.second) {
             return lhs.second > rhs.second;
@@ -30,7 +30,6 @@ struct FrequencyCmp {
 };
 
 using HeaderTable = std::map<HeaderKey, void*, FrequencyCmp>;
-
 
 /// <h1>Input</h1>
 
@@ -67,6 +66,7 @@ public:
         find_frequent_items();
         build_header_table();
         exclude_non_frequent_items();
+        sort_transaction_items();
     }
 
     void print_transaction_db() {
@@ -91,10 +91,20 @@ private:
 
     void exclude_non_frequent_items();
 
+    void sort_transaction_items();
+
     void construct_fp_tree() {}
 
-    bool is_frequent(Item item) {
+    bool is_frequent(const Item item) {
         return frequent_items.find(item) != frequent_items.end();
+    }
+
+    HeaderKey get_key(const Item x) {
+        return std::make_pair(x, item_counter[x]);
+    }
+
+    bool frequent_than(const Item lhs, const Item rhs) {
+        return FrequencyCmp()(get_key(lhs), get_key(rhs));
     }
 
     TransactionDB transactions;
@@ -138,8 +148,18 @@ void FPTree::exclude_non_frequent_items() {
     // remove empty transactions from DB
     transactions.erase(
         std::remove_if(transactions.begin(), transactions.end(),
-                       [](Transaction& x) { return x.empty(); }),
+                       [](Transaction& t) { return t.empty(); }),
         transactions.end());
+}
+
+void FPTree::sort_transaction_items() {
+    std::for_each(
+        transactions.begin(), transactions.end(),
+        [this](Transaction& t) {
+            std::sort(t.begin(), t.end(),
+                      [this](const Item a, const Item b) { return frequent_than(a, b); });
+        }
+    );
 }
 
 
@@ -150,7 +170,6 @@ int main(int argc, char** argv) {
     }
 
     double min_support = std::strtod(argv[1], nullptr);
-    std::cout << min_support << std::endl;
     std::string in_filename = std::string(argv[2]);
     std::string out_filename = std::string(argv[3]);
 
@@ -158,7 +177,6 @@ int main(int argc, char** argv) {
     FPTree fp_tree(std::move(transactions), min_support);
 //    fp_tree.print_header_table();
 //    fp_tree.print_transaction_db();
-
 
     return 0;
 }
