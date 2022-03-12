@@ -31,21 +31,10 @@ struct FrequencyCmp {
     }
 };
 
-template<>
-struct std::hash<HeaderKey>
-{
-    std::size_t operator()(const HeaderKey& key) const noexcept
-    {
-        std::size_t h1 = std::hash<Item>{}(key.first);
-        std::size_t h2 = std::hash<int>{}(key.second);
-        return h1 ^ ((h2 * 3) >> 1); // or use boost::hash_combine
-    }
-};
-
 struct TreeNode;
 
 using HeadTailPointer = std::pair<TreeNode*, TreeNode*>;
-using HeaderTable = std::unordered_map<HeaderKey, HeadTailPointer>;
+using HeaderTable = std::map<HeaderKey, HeadTailPointer, FrequencyCmp>;
 
 using LightweightTree = std::pair<HeaderTable, TreeNode*>;
 
@@ -130,16 +119,12 @@ struct TreeNode {
     // return the root of the copied tree
     LightweightTree copy(HeaderTable ht) const {
         NodeMapping node_map;
+        std::cout << "copying " << std::endl;
         TreeNode* new_root = _copy_tree_edge(node_map, nullptr);
         _copy_cross_link(ht, node_map);
+        std::cout << "finish " << std::endl;
 
         return std::make_pair(std::move(ht), new_root);
-    }
-
-    // delete the subtree
-    void prune_subtree() {
-        delete left_child;
-        left_child = nullptr;
     }
 
     // Return true if `x` not in any subtree and thus can be removed.
@@ -165,7 +150,6 @@ struct TreeNode {
                     left_child = child->right_sibling;
                 }
                 child->right_sibling = nullptr;
-//                std::cout << "prune " << *child << std::endl;
                 delete child;
                 child = temp;
             } else {
@@ -175,52 +159,6 @@ struct TreeNode {
         }
 
         return all_children_without_x && item != x;
-    }
-
-    void append_to_child(TreeNode* target) {
-        if (!target) {
-            return;
-        }
-        if (!left_child) {
-            left_child = target;
-            return;
-        }
-
-        auto curr = left_child;
-        for (; curr->right_sibling; curr = curr->right_sibling) {}
-        curr->right_sibling = target;
-
-        for (auto t = target; t; t = t->right_sibling) {
-            t->parent = this;
-        }
-    }
-
-    void merge_children() {
-        if (!left_child) {
-            return;
-        }
-
-        std::map<Item, TreeNode*> exists;
-        TreeNode* prev{};
-        for (auto curr = left_child; curr;) {
-            if (exists.find(curr->item) == exists.end()) {
-                exists[curr->item] = curr;
-                prev = curr;
-                curr = curr->right_sibling;
-            } else {
-                // merge counts
-                auto major_node = exists[curr->item];
-                major_node->count += curr->count;
-                major_node->append_to_child(curr->left_child);
-
-                // remove curr from tree
-                curr->left_child = nullptr;
-                prev->right_sibling = curr->right_sibling;
-                curr->right_sibling = nullptr;
-                delete curr;
-                curr = prev->right_sibling;
-            }
-        }
     }
 
     TreeNode* get_right_or_back() const {
@@ -237,7 +175,6 @@ struct TreeNode {
     }
 
     ~TreeNode() {
-//        std::cout << "delete " << this << " (" << *this << ")" << std::endl;
         delete left_child;
         delete right_sibling;
     }
@@ -359,7 +296,6 @@ public:
         refresh_counts(x);
         auto cfp_tree = construct_conditional_fp_tree(x);
         auto paths = cfp_tree.find_all_pattern_paths(x);
-        std::cout << "expanding " << x << std::endl;
         auto frequent_pattens = expand_all_combinations(x, paths);
         erase_infrequent_patterns(frequent_pattens, min_support_count);
 
@@ -415,7 +351,6 @@ private:
 
     void construct_fp_tree();
 
-public:
     void prune_by(Item x);
 
     void refresh_counts(Item x);
@@ -423,10 +358,6 @@ public:
     FPTree construct_conditional_fp_tree(Item x);
 
     FrequentPatterns find_all_pattern_paths(Item x);
-
-    bool remove_one_infrequent_child(TreeNode* node, Item x);
-
-    void remove_candidate(TreeNode* node, std::pair<TreeNode*, TreeNode*>& candidate) const;
 
     bool is_frequent(const Item item) {
         return frequent_items.find(item) != frequent_items.end();
@@ -565,65 +496,6 @@ FPTree FPTree::construct_conditional_fp_tree(Item x) {
     }
     FPTree conditional_fp(std::move(conditional_base), min_support, min_support_count, this);
     return conditional_fp;
-}
-
-
-//void FPTree::construct_conditional_fp_tree(Item x) {
-//    std::deque<TreeNode*> nodes_to_be_check;
-//    nodes_to_be_check.emplace_back(root);
-//
-//    while (!nodes_to_be_check.empty()) {
-//        auto node = nodes_to_be_check.front();
-//        do {
-//            node->merge_children();
-//        } while (remove_one_infrequent_child(node, x));
-//
-//        for (auto child = node->left_child; child; child = child->right_sibling) {
-//            nodes_to_be_check.push_back(child);
-//        }
-//        nodes_to_be_check.pop_front();
-//    }
-//}
-
-bool FPTree::remove_one_infrequent_child(TreeNode* node, Item x) {
-    if (!node->left_child) {
-        return false;
-    }
-
-    // pair<prev, curr>
-    std::pair<TreeNode*, TreeNode*> candidate;
-
-    TreeNode* prev{};
-//    TreeNode* most_frequent{node->left_child};
-    for (auto curr = node->left_child; curr; prev = curr, curr = curr->right_sibling) {
-//        if (frequent_than(curr->item, most_frequent->item)) {
-//            most_frequent = curr;
-//        }
-        if (curr->item != x && curr->count < min_support_count) {
-            if (!candidate.second ||
-                frequent_than(curr->item, candidate.second->item)) {
-                candidate = std::make_pair(prev, curr);
-            }
-        }
-    }
-    if (candidate.second) {
-        remove_candidate(node, candidate);
-        return true;
-    }
-
-    return false;
-}
-
-void FPTree::remove_candidate(TreeNode* node, std::pair<TreeNode*, TreeNode*>& candidate) const {
-    if (candidate.first) {
-        candidate.first->right_sibling = candidate.second->right_sibling;
-    } else {
-        node->left_child = candidate.second->right_sibling;
-    }
-    node->append_to_child(candidate.second->left_child);
-    candidate.second->left_child = nullptr;
-    candidate.second->right_sibling = nullptr;
-    delete candidate.second;
 }
 
 FrequentPatterns FPTree::find_all_pattern_paths(Item x) {
