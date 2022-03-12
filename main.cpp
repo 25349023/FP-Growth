@@ -11,6 +11,7 @@
 #include <functional>
 #include <iomanip>
 #include <deque>
+#include <chrono>
 
 
 using Item = int;
@@ -30,16 +31,37 @@ struct FrequencyCmp {
     }
 };
 
+template<>
+struct std::hash<HeaderKey>
+{
+    std::size_t operator()(const HeaderKey& key) const noexcept
+    {
+        std::size_t h1 = std::hash<Item>{}(key.first);
+        std::size_t h2 = std::hash<int>{}(key.second);
+        return h1 ^ ((h2 * 3) >> 1); // or use boost::hash_combine
+    }
+};
+
 struct TreeNode;
 
 using HeadTailPointer = std::pair<TreeNode*, TreeNode*>;
-using HeaderTable = std::map<HeaderKey, HeadTailPointer, FrequencyCmp>;
+using HeaderTable = std::unordered_map<HeaderKey, HeadTailPointer>;
 
 using LightweightTree = std::pair<HeaderTable, TreeNode*>;
 
 using Pattern = std::set<Item>;
+
+struct PatternCmp {
+    bool operator()(const Pattern& lhs, const Pattern& rhs) const {
+        if (lhs.size() != rhs.size()) {
+            return lhs.size() < rhs.size();
+        }
+        return lhs < rhs;
+    }
+};
+
 using Patterns = std::vector<Pattern>;
-using FrequentPatterns = std::map<std::set<Item>, double>;
+using FrequentPatterns = std::map<Pattern, double, PatternCmp>;
 
 std::ostream& operator<<(std::ostream& out, const Pattern& p);
 std::ostream& operator<<(std::ostream& out, const Patterns& ps);
@@ -64,6 +86,7 @@ TransactionDB read_transaction_file(const std::string& in_fname) {
     if (transactions.back().empty()) {
         transactions.pop_back();
     }
+    fin.close();
 
     return transactions;
 }
@@ -93,7 +116,7 @@ struct TreeNode {
         }
 
         TreeNode* prev = nullptr;
-        for (auto child = left_child; child != nullptr; prev = child, child = child->right_sibling) {
+        for (auto child = left_child; child; prev = child, child = child->right_sibling) {
             if (child->item == x) {
                 child->count++;
                 return std::make_pair(child, false);
@@ -122,7 +145,6 @@ struct TreeNode {
     // Return true if `x` not in any subtree and thus can be removed.
     // Does NOT handle cross-links, so after this action, the cross-links of
     // nodes whose item is not `x` will become invalid
-    // FIXME: removing is incorrect, missing right sibling may happen.
     bool remove_subtrees_without(Item x) {
         if (!left_child) {
             return item != x;
@@ -130,7 +152,7 @@ struct TreeNode {
 
         bool all_children_without_x = true;
         TreeNode* prev{};
-        for (auto child = left_child; child != nullptr;) {
+        for (auto child = left_child; child;) {
             bool without_x = child->remove_subtrees_without(x);
             all_children_without_x = all_children_without_x && without_x;
 
@@ -174,7 +196,6 @@ struct TreeNode {
     }
 
     void merge_children() {
-//        std::cout << "merge " << *this << " start\n";
         if (!left_child) {
             return;
         }
@@ -200,11 +221,6 @@ struct TreeNode {
                 curr = prev->right_sibling;
             }
         }
-//        for (auto curr = left_child; curr; curr = curr->right_sibling) {
-//            std::cout << *curr << ", ";
-//        }
-//        std::cout << std::endl;
-//        std::cout << "merge end\n";
     }
 
     TreeNode* get_right_or_back() const {
@@ -245,7 +261,7 @@ private:
         // copy cross-links
         for (auto&[key, head_tail]: ht) {
             if (head_tail.first) {
-                for (auto node = head_tail.first; node != nullptr;) {
+                for (auto node = head_tail.first; node;) {
                     const auto next = node->cross_link;
                     if (next) {
                         node_map[node]->cross_link = node_map[next];
@@ -300,12 +316,23 @@ FrequentPatterns expand_all_combinations(Item x, FrequentPatterns paths) {
     return fp;
 }
 
+void erase_infrequent_patterns(FrequentPatterns& frequent_pattens, double min_support_count) {
+    for (auto it = frequent_pattens.begin(); it != frequent_pattens.end();) {
+        if ((*it).second < min_support_count) {
+            it = frequent_pattens.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+
 /// <h1>FP Tree</h1>
 
 class FPTree {
 public:
-    explicit FPTree(TransactionDB&& tr, double ms) :
-        transactions(std::move(tr)), min_support_count(ms * transactions.size()) {
+    explicit FPTree(TransactionDB&& tr, double ms, double msc, FPTree* p = nullptr) :
+        transactions(std::move(tr)), min_support(ms), min_support_count(msc), parent(p) {
         build();
     }
 
@@ -330,21 +357,11 @@ public:
     FrequentPatterns mine(Item x) {
         prune_by(x);
         refresh_counts(x);
-//        construct_conditional_fp_tree(x);
-        auto paths = find_all_pattern_paths(x);
-//        for (const auto& path: paths) {
-//            std::cout << path.first << " : " << path.second << std::endl;
-//        }
+        auto cfp_tree = construct_conditional_fp_tree(x);
+        auto paths = cfp_tree.find_all_pattern_paths(x);
+        std::cout << "expanding " << x << std::endl;
         auto frequent_pattens = expand_all_combinations(x, paths);
-
-        for (auto it = frequent_pattens.begin(); it != frequent_pattens.end();) {
-            if ((*it).second < min_support_count) {
-                it = frequent_pattens.erase(it);
-            } else {
-                ++it;
-            }
-        }
-
+        erase_infrequent_patterns(frequent_pattens, min_support_count);
 
         return frequent_pattens;
     }
@@ -367,7 +384,7 @@ public:
 
     void traverse_cross_links() {
         for (const auto& links: header_table) {
-            for (TreeNode* curr = links.second.first; curr != nullptr; curr = curr->cross_link) {
+            for (TreeNode* curr = links.second.first; curr; curr = curr->cross_link) {
                 std::cout << curr->item << " : " << curr->count << ", ";
             }
             std::cout << std::endl;
@@ -378,7 +395,8 @@ public:
     // there is no need to copy transactions and frequent_items
     // since they will not participate in the mining stage
     FPTree(const FPTree& oth)
-        : min_support_count(oth.min_support_count), item_counter(oth.item_counter) {
+        : min_support(oth.min_support), min_support_count(oth.min_support_count),
+          item_counter(oth.item_counter) {
         std::tie(header_table, root) = oth.root->copy(oth.header_table);
     }
 
@@ -402,11 +420,13 @@ public:
 
     void refresh_counts(Item x);
 
-    void construct_conditional_fp_tree(Item x);
+    FPTree construct_conditional_fp_tree(Item x);
 
     FrequentPatterns find_all_pattern_paths(Item x);
 
-    bool remove_one_child(TreeNode* node, Item x);
+    bool remove_one_infrequent_child(TreeNode* node, Item x);
+
+    void remove_candidate(TreeNode* node, std::pair<TreeNode*, TreeNode*>& candidate) const;
 
     bool is_frequent(const Item item) {
         return frequent_items.find(item) != frequent_items.end();
@@ -421,12 +441,13 @@ public:
     }
 
     TransactionDB transactions;
+    double min_support;
     double min_support_count;
-    std::map<Item, int> item_counter{};
+    std::unordered_map<Item, int> item_counter{};
     std::unordered_set<Item> frequent_items{};
     HeaderTable header_table{};
     TreeNode* root{};
-    void remove_candidate(TreeNode* node, std::pair<TreeNode*, TreeNode*>& candidate) const;
+    FPTree* parent{};
 };
 
 void FPTree::find_frequent_items() {
@@ -467,13 +488,23 @@ void FPTree::exclude_non_frequent_items() {
 }
 
 void FPTree::sort_transaction_items() {
-    std::for_each(
-        transactions.begin(), transactions.end(),
-        [this](Transaction& t) {
-            std::sort(t.begin(), t.end(),
-                      [this](const Item a, const Item b) { return frequent_than(a, b); });
-        }
-    );
+    if (!parent) {
+        std::for_each(
+            transactions.begin(), transactions.end(),
+            [this](Transaction& t) {
+                std::sort(t.begin(), t.end(),
+                          [this](const Item a, const Item b) { return frequent_than(a, b); });
+            }
+        );
+    } else {
+        std::for_each(
+            transactions.begin(), transactions.end(),
+            [this](Transaction& t) {
+                std::sort(t.begin(), t.end(),
+                          [this](const Item a, const Item b) { return parent->frequent_than(a, b); });
+            }
+        );
+    }
 }
 
 void FPTree::construct_fp_tree() {
@@ -524,24 +555,37 @@ void FPTree::refresh_counts(Item x) {
     }
 }
 
-void FPTree::construct_conditional_fp_tree(Item x) {
-    std::deque<TreeNode*> nodes_to_be_check;
-    nodes_to_be_check.emplace_back(root);
-
-    while (!nodes_to_be_check.empty()) {
-        auto node = nodes_to_be_check.front();
-        do {
-            node->merge_children();
-        } while (remove_one_child(node, x));
-
-        for (auto child = node->left_child; child; child = child->right_sibling) {
-            nodes_to_be_check.push_back(child);
-        }
-        nodes_to_be_check.pop_front();
+FPTree FPTree::construct_conditional_fp_tree(Item x) {
+    auto paths = find_all_pattern_paths(x);
+    TransactionDB conditional_base;
+    for (const auto& path: paths) {
+        Transaction t(path.first.cbegin(), path.first.cend());
+        conditional_base.insert(
+            conditional_base.end(), static_cast<int>(path.second), t);
     }
+    FPTree conditional_fp(std::move(conditional_base), min_support, min_support_count, this);
+    return conditional_fp;
 }
 
-bool FPTree::remove_one_child(TreeNode* node, Item x) {
+
+//void FPTree::construct_conditional_fp_tree(Item x) {
+//    std::deque<TreeNode*> nodes_to_be_check;
+//    nodes_to_be_check.emplace_back(root);
+//
+//    while (!nodes_to_be_check.empty()) {
+//        auto node = nodes_to_be_check.front();
+//        do {
+//            node->merge_children();
+//        } while (remove_one_infrequent_child(node, x));
+//
+//        for (auto child = node->left_child; child; child = child->right_sibling) {
+//            nodes_to_be_check.push_back(child);
+//        }
+//        nodes_to_be_check.pop_front();
+//    }
+//}
+
+bool FPTree::remove_one_infrequent_child(TreeNode* node, Item x) {
     if (!node->left_child) {
         return false;
     }
@@ -563,16 +607,7 @@ bool FPTree::remove_one_child(TreeNode* node, Item x) {
         }
     }
     if (candidate.second) {
-        //*
-//        std::cout << "candidate " << *candidate.second << std::endl;
-//        for (auto ch = candidate.second->left_child; ch; ch = ch->right_sibling) {
-//            std::cout << *ch << ", ";
-//        }
-//        std::cout << std::endl;
-         //*/
         remove_candidate(node, candidate);
-//                std::cout << "remove " << candidate.second << std::endl;
-//                  << " with prev = " << *candidate.first << std::endl;
         return true;
     }
 
@@ -615,7 +650,6 @@ FrequentPatterns FPTree::find_all_pattern_paths(Item x) {
         for (auto it = visiting_stack.cbegin() + 1; it != visiting_stack.cend(); ++it) {
 //            if ((*it)->item != x) {
             pat.insert((*it)->item);
-//            std::cout << **it << std::endl;
 //            }
         }
         paths[pat] += curr->count;
@@ -625,7 +659,6 @@ FrequentPatterns FPTree::find_all_pattern_paths(Item x) {
     }
     return paths;
 }
-
 
 
 /// <h1>Output Formatting</h1>
@@ -654,49 +687,48 @@ std::ostream& operator<<(std::ostream& out, const FrequentPatterns& fp) {
 }
 
 
+/// <h1>Output</h1>
+
+void print_frequent_patterns_to(std::ostream& out, FrequentPatterns fp, int total) {
+    auto flags{out.flags()};
+
+    for (const auto& pattern: fp) {
+        auto it = pattern.first.cbegin();
+        out << *it++;
+        for (; it != pattern.first.cend(); ++it) {
+            out << "," << *it;
+        }
+        out << ":" << std::fixed << std::setprecision(4) << pattern.second / total << std::endl;
+    }
+
+    out.flags(flags);
+}
+
+
 int main(int argc, char** argv) {
     if (argc != 4) {
         std::cerr << "invalid argument!" << std::endl;
         std::exit(1);
     }
 
+    auto start = std::chrono::steady_clock::now();
+
     double min_support = std::strtod(argv[1], nullptr);
     std::string in_filename = std::string(argv[2]);
     std::string out_filename = std::string(argv[3]);
 
     auto&& transactions = read_transaction_file(in_filename);
-    FPTree fp_tree(std::move(transactions), min_support);
-//    std::cout << "min supp count: " << fp_tree.min_support_count << std::endl;
-//    fp_tree.prune_by(6);
-//    fp_tree.refresh_counts(6);
-//    fp_tree.construct_conditional_fp_tree(3);
-//    auto t = fp_tree.find_all_pattern_paths(6);
-//    std::cout << t;
+    int total_counts = transactions.size();
+    FPTree fp_tree(std::move(transactions), min_support, total_counts * min_support);
 
     auto fps = fp_tree.mine_all();
-//    auto fps = fp_tree.mine(8);
-//    std::cout << fps.size() << std::endl << fps;
+    std::ofstream fout(out_filename);
+    print_frequent_patterns_to(fout, fps, total_counts);
+    fout.close();
 
-//    Patterns ps;
-//    Pattern p{1, 4, 6, 3}, p2{8, 3}, empty{3};
-//    FrequentPatterns fp;
-//    fp[p] = 2;
-//    fp[p2] = 3;
-//    combinations_with(0, 2, empty, p.cbegin(), p.cend(), ps);
-//    auto t = expand_all_combinations(3, fp);
-//    std::cout << t;
-
-//    fp_tree.print_transaction_db();
-//    std::cout << std::endl;
-//    fp_tree.print_header_table();
-//    std::cout << std::endl;
-//    fp_tree.traverse_cross_links();
-//
-//    std::cout << std::endl;
-//    FPTree copy{fp_tree};
-//    copy.print_header_table();
-//    std::cout << std::endl;
-//    copy.traverse_cross_links();
+    auto end = std::chrono::steady_clock::now();
+    std::chrono::duration<double> elapsed_seconds = end - start;
+    std::cout << "elapsed time: " << elapsed_seconds.count() << "s\n";
 
     return 0;
 }
