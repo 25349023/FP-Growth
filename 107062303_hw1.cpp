@@ -36,8 +36,6 @@ struct TreeNode;
 using HeadTailPointer = std::pair<TreeNode*, TreeNode*>;
 using HeaderTable = std::map<HeaderKey, HeadTailPointer, FrequencyCmp>;
 
-using LightweightTree = std::pair<HeaderTable, TreeNode*>;
-
 using Pattern = std::set<Item>;
 
 struct PatternCmp {
@@ -50,7 +48,7 @@ struct PatternCmp {
 };
 
 using Patterns = std::vector<Pattern>;
-using FrequentPatterns = std::map<Pattern, double, PatternCmp>;
+using FrequentPatterns = std::map<Pattern, long double, PatternCmp>;
 
 std::ostream& operator<<(std::ostream& out, const Pattern& p);
 std::ostream& operator<<(std::ostream& out, const Patterns& ps);
@@ -83,8 +81,6 @@ TransactionDB read_transaction_file(const std::string& in_fname) {
 /// <h1>Tree Node</h1>
 
 struct TreeNode {
-    using NodeMapping = std::unordered_map<const TreeNode*, TreeNode*>;
-
     Item item;
     int count{1};
     TreeNode* left_child{};
@@ -104,7 +100,7 @@ struct TreeNode {
             return std::make_pair(left_child, true);
         }
 
-        TreeNode* prev = nullptr;
+        TreeNode* prev{};
         for (auto child = left_child; child; prev = child, child = child->right_sibling) {
             if (child->item == x) {
                 child->count++;
@@ -116,59 +112,6 @@ struct TreeNode {
         return std::make_pair(prev->right_sibling, true);
     }
 
-    // return the root of the copied tree
-    LightweightTree copy(HeaderTable ht) const {
-        NodeMapping node_map;
-        std::cout << "copying " << std::endl;
-        TreeNode* new_root = _copy_tree_edge(node_map, nullptr);
-        _copy_cross_link(ht, node_map);
-        std::cout << "finish " << std::endl;
-
-        return std::make_pair(std::move(ht), new_root);
-    }
-
-    // Return true if `x` not in any subtree and thus can be removed.
-    // Does NOT handle cross-links, so after this action, the cross-links of
-    // nodes whose item is not `x` will become invalid
-    bool remove_subtrees_without(Item x) {
-        if (!left_child) {
-            return item != x;
-        }
-
-        bool all_children_without_x = true;
-        TreeNode* prev{};
-        for (auto child = left_child; child;) {
-            bool without_x = child->remove_subtrees_without(x);
-            all_children_without_x = all_children_without_x && without_x;
-
-            if (without_x) {
-                auto temp = child->right_sibling;
-                if (prev) {
-                    prev->right_sibling = child->right_sibling;
-                } else {
-                    // child is the leftmost child
-                    left_child = child->right_sibling;
-                }
-                child->right_sibling = nullptr;
-                delete child;
-                child = temp;
-            } else {
-                prev = child;
-                child = child->right_sibling;
-            }
-        }
-
-        return all_children_without_x && item != x;
-    }
-
-    TreeNode* get_right_or_back() const {
-        if (right_sibling) {
-            return right_sibling;
-        } else {
-            return parent;
-        }
-    }
-
     friend std::ostream& operator<<(std::ostream& out, const TreeNode& tr) {
         out << tr.item << " : " << tr.count;
         return out;
@@ -177,38 +120,6 @@ struct TreeNode {
     ~TreeNode() {
         delete left_child;
         delete right_sibling;
-    }
-
-private:
-    TreeNode* _copy_tree_edge(NodeMapping& node_map, TreeNode* p) const {
-        auto new_root = new TreeNode(*this);
-        new_root->parent = p;
-        node_map[this] = new_root;
-
-        if (left_child) {
-            new_root->left_child = left_child->_copy_tree_edge(node_map, new_root);
-        }
-        if (right_sibling) {
-            new_root->right_sibling = right_sibling->_copy_tree_edge(node_map, p);
-        }
-        return new_root;
-    }
-
-    void _copy_cross_link(HeaderTable& ht, NodeMapping& node_map) const {
-        // copy cross-links
-        for (auto&[key, head_tail]: ht) {
-            if (head_tail.first) {
-                for (auto node = head_tail.first; node;) {
-                    const auto next = node->cross_link;
-                    if (next) {
-                        node_map[node]->cross_link = node_map[next];
-                    }
-                    node = next;
-                }
-                head_tail.first = node_map[head_tail.first];
-                head_tail.second = node_map[head_tail.second];
-            }
-        }
     }
 
 };
@@ -237,7 +148,7 @@ void combinations_with(
     }
 }
 
-FrequentPatterns expand_all_combinations(Item x, FrequentPatterns paths) {
+FrequentPatterns expand_all_combinations(Item x, const FrequentPatterns& paths) {
     FrequentPatterns fp;
     for (const auto& path: paths) {
         for (int k = 0; k <= path.first.size(); ++k) {
@@ -253,7 +164,7 @@ FrequentPatterns expand_all_combinations(Item x, FrequentPatterns paths) {
     return fp;
 }
 
-void erase_infrequent_patterns(FrequentPatterns& frequent_pattens, double min_support_count) {
+void erase_infrequent_patterns(FrequentPatterns& frequent_pattens, long double min_support_count) {
     for (auto it = frequent_pattens.begin(); it != frequent_pattens.end();) {
         if ((*it).second < min_support_count) {
             it = frequent_pattens.erase(it);
@@ -268,7 +179,7 @@ void erase_infrequent_patterns(FrequentPatterns& frequent_pattens, double min_su
 
 class FPTree {
 public:
-    explicit FPTree(TransactionDB&& tr, double ms, double msc, FPTree* p = nullptr) :
+    explicit FPTree(TransactionDB&& tr, long double ms, long double msc, FPTree* p = nullptr) :
         transactions(std::move(tr)), min_support(ms), min_support_count(msc), parent(p) {
         build();
     }
@@ -284,16 +195,13 @@ public:
     FrequentPatterns mine_all() {
         FrequentPatterns result;
         for (const auto& item: frequent_items) {
-            FPTree copied_fptree(*this);
-            result.merge(copied_fptree.mine(item));
+            result.merge(mine(item));
         }
         return result;
     }
 
     // mining will make some unrecoverable changes to the tree, so be sure that the tree is copied
     FrequentPatterns mine(Item x) {
-        prune_by(x);
-        refresh_counts(x);
         auto cfp_tree = construct_conditional_fp_tree(x);
         auto paths = cfp_tree.find_all_pattern_paths(x);
         auto frequent_pattens = expand_all_combinations(x, paths);
@@ -327,15 +235,6 @@ public:
         }
     }
 
-
-    // there is no need to copy transactions and frequent_items
-    // since they will not participate in the mining stage
-    FPTree(const FPTree& oth)
-        : min_support(oth.min_support), min_support_count(oth.min_support_count),
-          item_counter(oth.item_counter) {
-        std::tie(header_table, root) = oth.root->copy(oth.header_table);
-    }
-
     ~FPTree() {
         delete root;
     }
@@ -350,10 +249,6 @@ private:
     void sort_transaction_items();
 
     void construct_fp_tree();
-
-    void prune_by(Item x);
-
-    void refresh_counts(Item x);
 
     FPTree construct_conditional_fp_tree(Item x);
 
@@ -372,8 +267,8 @@ private:
     }
 
     TransactionDB transactions;
-    double min_support;
-    double min_support_count;
+    long double min_support;
+    long double min_support_count;
     std::unordered_map<Item, int> item_counter{};
     std::unordered_set<Item> frequent_items{};
     HeaderTable header_table{};
@@ -447,7 +342,6 @@ void FPTree::construct_fp_tree() {
 
             // handle cross-links
             if (ok) {
-//                std::cout << "add " << item << ", ";
                 auto key = get_key(item);
                 auto& ht_entry = header_table[key];
                 if (!ht_entry.first) {
@@ -456,32 +350,9 @@ void FPTree::construct_fp_tree() {
                     ht_entry.second->cross_link = node;
                     ht_entry.second = ht_entry.second->cross_link;
                 }
-            } else {
-//                std::cout << "increase " << item << ", ";
             }
 
             curr = node;
-        }
-//        std::cout << std::endl;
-    }
-}
-
-void FPTree::prune_by(Item x) {
-    root->remove_subtrees_without(x);
-}
-
-void FPTree::refresh_counts(Item x) {
-    auto links = header_table[get_key(x)];
-
-    // refresh item counts in a bottom-up manner
-    for (auto curr = links.first; curr; curr = curr->cross_link) {
-        for (auto p = curr->parent; p; p = p->parent) {
-            p->count = 0;
-        }
-    }
-    for (auto curr = links.first; curr; curr = curr->cross_link) {
-        for (auto p = curr->parent; p; p = p->parent) {
-            p->count += curr->count;
         }
     }
 }
@@ -499,36 +370,18 @@ FPTree FPTree::construct_conditional_fp_tree(Item x) {
 }
 
 FrequentPatterns FPTree::find_all_pattern_paths(Item x) {
+    auto links = header_table[get_key(x)];
     std::deque<TreeNode*> visiting_stack;
     FrequentPatterns paths;
 
-    auto curr = root;
-    while (curr) {
-        // if returning from left_child, then
-        // go to the right_sibling or back to the parent
-        if (!visiting_stack.empty() && curr == visiting_stack.back()) {
-            visiting_stack.pop_back();
-            curr = curr->get_right_or_back();
-            continue;
-        }
-
-        visiting_stack.push_back(curr);
-        if (curr->left_child) {
-            curr = curr->left_child;
-            continue;
-        }
-
+    for (auto leaf = links.first; leaf; leaf = leaf->cross_link) {
         Pattern pat;
-        for (auto it = visiting_stack.cbegin() + 1; it != visiting_stack.cend(); ++it) {
-//            if ((*it)->item != x) {
-            pat.insert((*it)->item);
-//            }
+        for (auto curr = leaf; curr != root; curr = curr->parent) {
+            pat.insert(curr->item);
         }
-        paths[pat] += curr->count;
-
-        visiting_stack.pop_back();
-        curr = curr->get_right_or_back();
+        paths[pat] += leaf->count;
     }
+
     return paths;
 }
 
@@ -561,7 +414,7 @@ std::ostream& operator<<(std::ostream& out, const FrequentPatterns& fp) {
 
 /// <h1>Output</h1>
 
-void print_frequent_patterns_to(std::ostream& out, FrequentPatterns fp, int total) {
+void print_frequent_patterns_to(std::ostream& out, const FrequentPatterns& fp, std::size_t total) {
     auto flags{out.flags()};
 
     for (const auto& pattern: fp) {
@@ -585,12 +438,12 @@ int main(int argc, char** argv) {
 
     auto start = std::chrono::steady_clock::now();
 
-    double min_support = std::strtod(argv[1], nullptr);
+    long double min_support = std::strtold(argv[1], nullptr);
     std::string in_filename = std::string(argv[2]);
     std::string out_filename = std::string(argv[3]);
 
     auto&& transactions = read_transaction_file(in_filename);
-    int total_counts = transactions.size();
+    auto total_counts = transactions.size();
     FPTree fp_tree(std::move(transactions), min_support, total_counts * min_support);
 
     auto fps = fp_tree.mine_all();

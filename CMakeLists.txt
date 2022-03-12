@@ -3,4 +3,4 @@ project(frequent_pattern)
 
 set(CMAKE_CXX_STANDARD 20)
 
-add_executable(frequent_pattern main.cpp)
+add_executable(frequent_pattern 107062303_hw1.cpp)
