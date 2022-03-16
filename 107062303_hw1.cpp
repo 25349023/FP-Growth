@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <deque>
 #include <chrono>
+#include <pthread.h>
 
 
 using Item = int;
@@ -177,6 +178,16 @@ void erase_infrequent_patterns(FrequentPatterns& frequent_pattens, long double m
 
 /// <h1>FP Tree</h1>
 
+class FPTree;
+
+struct ThreadInfo {
+    int t_id;
+    int t_count;
+    FPTree* tree;
+    FrequentPatterns* result;
+    pthread_mutex_t* mutex;
+};
+
 class FPTree {
 public:
     explicit FPTree(TransactionDB&& tr, long double ms, long double msc, FPTree* p = nullptr) :
@@ -192,10 +203,12 @@ public:
         construct_fp_tree();
     }
 
-    FrequentPatterns mine_all() {
+    FrequentPatterns mine_all(int t_id, int t_count) {
         FrequentPatterns result;
-        for (const auto& item: frequent_items) {
-            result.merge(mine(item));
+        std::vector<Item> freq_items(frequent_items.cbegin(), frequent_items.cend());
+
+        for (int i = t_id; i < freq_items.size(); i += t_count) {
+            result.merge(mine(freq_items[i]));
         }
         return result;
     }
@@ -239,6 +252,16 @@ public:
         delete root;
     }
 
+    static void* thread_mine(void* tinfo) {
+        auto info = static_cast<ThreadInfo*>(tinfo);
+        auto patterns = info->tree->mine_all(info->t_id, info->t_count);
+        pthread_mutex_lock(info->mutex);
+        info->result->merge(patterns);
+        pthread_mutex_unlock(info->mutex);
+        pthread_exit(nullptr);
+        return nullptr;
+    }
+
 private:
     void find_frequent_items();
 
@@ -270,7 +293,7 @@ private:
     long double min_support;
     long double min_support_count;
     std::unordered_map<Item, int> item_counter{};
-    std::unordered_set<Item> frequent_items{};
+    std::set<Item> frequent_items{};
     HeaderTable header_table{};
     TreeNode* root{};
     FPTree* parent{};
@@ -446,14 +469,37 @@ int main(int argc, char** argv) {
     auto total_counts = transactions.size();
     FPTree fp_tree(std::move(transactions), min_support, total_counts * min_support);
 
-    auto fps = fp_tree.mine_all();
+    FrequentPatterns fps;
+
+    constexpr int thread_count = 8;
+    pthread_t threads[thread_count];
+    ThreadInfo infos[thread_count];
+
+    pthread_mutex_t mutex;
+    pthread_mutex_init(&mutex, nullptr);
+
+    for (int i = 0; i < 8; ++i) {
+        infos[i].t_id = i;
+        infos[i].t_count = thread_count;
+        infos[i].tree = &fp_tree;
+        infos[i].mutex = &mutex;
+        infos[i].result = &fps;
+        pthread_create(&threads[i], nullptr, FPTree::thread_mine, &infos[i]);
+    }
+
+    for (auto& thread: threads) {
+        pthread_join(thread, nullptr);
+    }
+
+    pthread_mutex_destroy(&mutex);
+
     std::ofstream fout(out_filename);
     print_frequent_patterns_to(fout, fps, total_counts);
     fout.close();
 
     auto end = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed_seconds = end - start;
-    std::cout << "elapsed time: " << elapsed_seconds.count() << "s\n";
+    std::cout << "elapsed time: " << elapsed_seconds.count() << "s" << std::endl;
 
     return 0;
 }
